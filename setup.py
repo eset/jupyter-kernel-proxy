@@ -15,7 +15,7 @@ setup(
     author_email='leveille@eset.com',
     url='https://github.com/eset/jupyter-kernel-proxy',
     license="BSD",
-    py_modules="jupyter_kernel_proxy",
+    py_modules=[ "jupyter_kernel_proxy" ],
     python_requires=">=2.7",
     install_requires=[
         "jupyter-core",
