@@ -187,6 +187,11 @@ class KernelProxyManager(object):
             self.server = ProxyKernelServer(server)
         self.server.intercept_message("shell", "execute_request", self._catch_proxy_magic_command)
         self.magic_command = "%proxy"
+
+        self._kernel_info_requests = []
+        self.server.intercept_message("shell", "kernel_info_request", self._on_kernel_info_request)
+        self.server.intercept_message("shell", "kernel_info_reply", self._on_kernel_info_reply)
+
         self.connect_to_last()
 
     def _catch_proxy_magic_command(self, server, target_stream, data):
@@ -216,7 +221,7 @@ class KernelProxyManager(object):
             elif argv[1] == "connect":
                 if len(argv) > 2:
                     try:
-                        self.connect_to(argv[2])
+                        self.connect_to(argv[2], request_kernel_info=True)
                         send("Connecting to " + self.connected_kernel_name)
                     except ValueError:
                         send("Unknown kernel " + argv[2], "stderr")
@@ -262,19 +267,56 @@ class KernelProxyManager(object):
                 pass
         return self.kernels
 
+    def _on_kernel_info_request(self, server, target_stream, data):
+        header = json.loads(data[data.index(DELIMITER)+2])
+        self._kernel_info_requests.append(header.get("msg_id"))
+        ioloop.IOLoop.current().call_later(3, self._send_proxy_kernel_info, data)
+        return data
+
+    def _on_kernel_info_reply(self, server, target_stream, data):
+        parent_header = json.loads(request[request.index(DELIMITER)+3])
+        if parent_header.get("msg_id") in self._kernel_info_requests:
+            self._kernel_info_requests.remove(parent_header.get("msg_id"))
+        else:
+            self._kernel_info_requests.pop(0)
+        return data
+
+    def _send_proxy_kernel_info(self, request):
+        parent_header = json.loads(request[request.index(DELIMITER)+2])
+        if not parent_header.get("msg_id") in self._kernel_info_requests:
+            return
+        msg = self.server.make_multipart_message("kernel_info_reply", {
+            "status": "ok",
+            "protocol_version": "5.3",
+            "implementation": "proxy",
+            "banner": "Jupyter kernel proxy. Not connected or connected to unresponsive kernel. Use %proxy to connect.",
+            "language_info": {
+                "name": "magic",
+            },
+        }, parent_header=parent_header)
+        self.server.streams.shell.send_multipart(request[:request.index(DELIMITER)] + msg)
+        self.server.streams.iopub.send_multipart(self.server.make_multipart_message(
+            "status", { "execution_state": "idle"}, parent_header=parent_header
+        ))
+        self._kernel_info_requests.remove(parent_header.get("msg_id"))
+
     def connect_to_last(self):
         self.update_running_kernels()
         # Kernel at index 0 is highly likely to be the newly started proxy
         # _server_ (self.server) so we pick the one after that.
         self.connect_to(list(self.kernels.keys())[1])
 
-    def connect_to(self, kernel_file_name):
+    def connect_to(self, kernel_file_name, request_kernel_info=False):
         matching = next((n for n in self.kernels if kernel_file_name in n), None)
         if matching is None:
             raise ValueError("Unknown kernel " + kernel_file_name)
         self.connected_kernel_name = matching
         self.connected_kernel = ProxyKernelClient(self.kernels[matching])
         self.server.set_proxy_target(self.connected_kernel)
+        if request_kernel_info:
+            self.connected_kernel.streams.shell.send_multipart(
+                self.server.make_multipart_message("kernel_info_request")
+            )
 
 def install():
     user_kernels_dir = os.path.join(jupyter_data_dir(), "kernels")
