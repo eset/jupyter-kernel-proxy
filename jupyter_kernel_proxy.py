@@ -408,10 +408,10 @@ def install():
 
 def start(connection_file):
     loop = ioloop.IOLoop.current()
-    
+
     with open(connection_file) as f:
         notebook_config = json.load(f)
-    
+
     proxy_manager = KernelProxyManager(notebook_config)
 
     loop.start()
