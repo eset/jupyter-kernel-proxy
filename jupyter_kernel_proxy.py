@@ -330,7 +330,9 @@ class KernelProxyManager(object):
             try:
                 filename = os.path.basename(path)
                 with open(path, "r") as f:
-                    self.kernels[filename] = json.load(f)
+                    config = json.load(f)
+                    if config != self.server.config:
+                        self.kernels[filename] = config
             except:
                 # print something to stderr
                 pass
@@ -371,14 +373,14 @@ class KernelProxyManager(object):
 
     def connect_to_last(self):
         self.update_running_kernels()
-        # Kernel at index 0 is highly likely to be the newly started proxy
-        # _server_ (self.server) so we pick the one after that.
-        self.connect_to(list(self.kernels.keys())[1])
+        self.connect_to(next(iter(self.kernels.keys()), "<no kernel running>"))
 
     def connect_to(self, kernel_file_name, request_kernel_info=False):
         matching = next((n for n in self.kernels if kernel_file_name in n), None)
         if matching is None:
             raise ValueError("Unknown kernel " + kernel_file_name)
+        if self.kernels[matching] == self.server.config:
+            raise ValueError("Refusing loopback connection")
         self.connected_kernel_name = matching
         self.connected_kernel = ProxyKernelClient(self.kernels[matching])
         self.server.set_proxy_target(self.connected_kernel)
