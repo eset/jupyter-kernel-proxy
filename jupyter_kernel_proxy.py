@@ -306,7 +306,8 @@ class KernelProxyManager(object):
 
             server.streams.shell.send_multipart(msg.identities +
                 server.make_multipart_message(
-                "execute_reply", {"status": "ok"}, parent_header=msg.header
+                "execute_reply", {"status": "ok", "execution_count": 0},
+                parent_header=msg.header
             ))
             return None
         else:
