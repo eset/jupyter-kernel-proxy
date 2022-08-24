@@ -205,21 +205,22 @@ class ProxyKernelServer(AbstractProxyKernel):
             validate_using = validate_using or self.config.get("key")
             resign_using = resign_using or self.proxy_target.config.get("key")
         def handler(data):
-            msg = JupyterMessage.parse(data, socktype.signed and validate_using)
-            if not self.session_id and is_reply:
-                # We catch the session ID here so that if we inject custom
-                # messages we can use `make_multipart_message` to get a one with
-                # the right ID
-                self.session_id = msg.header.get("session")
-            for stream_type, msg_type, callback in self.filters:
-                if stream_type == socktype and msg_type == msg.header.get("msg_type"):
-                    new_data = callback(self, other_stream, data)
-                    if new_data is None:
-                        return
-                    else:
-                        data = new_data
-            if socktype.signed and resign_using:
-                data = msg.sign_using(resign_using).parts
+            if socktype.signed:
+                msg = JupyterMessage.parse(data, validate_using)
+                if not self.session_id and is_reply:
+                    # We catch the session ID here so that if we inject custom
+                    # messages we can use `make_multipart_message` to get a one with
+                    # the right ID
+                    self.session_id = msg.header.get("session")
+                for stream_type, msg_type, callback in self.filters:
+                    if stream_type == socktype and msg_type == msg.header.get("msg_type"):
+                        new_data = callback(self, other_stream, data)
+                        if new_data is None:
+                            return
+                        else:
+                            data = new_data
+                if resign_using:
+                    data = msg.sign_using(resign_using).parts
             other_stream.send_multipart(data)
             other_stream.flush()
         return handler
