@@ -323,7 +323,8 @@ class KernelProxyManager(object):
         )
 
     def update_running_kernels(self):
-        "Update self.kernels with an ordored dict where "
+        "Update self.kernels with an ordored dict where keys are file name and "
+        "values are the configuration (file content) as dict"
         files = glob.glob(os.path.join(jupyter_runtime_dir(), "kernel-*.json"))
         self.kernels = OrderedDict()
         for path in reversed(sorted(files, key=lambda f: os.stat(f).st_atime)):
