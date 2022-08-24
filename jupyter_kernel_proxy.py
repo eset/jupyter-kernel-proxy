@@ -383,9 +383,9 @@ class KernelProxyManager(object):
         self.connected_kernel = ProxyKernelClient(self.kernels[matching])
         self.server.set_proxy_target(self.connected_kernel)
         if request_kernel_info:
-            self.connected_kernel.streams.shell.send_multipart(
-                self.server.make_multipart_message("kernel_info_request")
-            )
+            req = self.connected_kernel.make_multipart_message("kernel_info_request")
+            self._on_kernel_info_request(self.server, self.connected_kernel.streams.shell, req)
+            self.connected_kernel.streams.shell.send_multipart(req)
 
 def install():
     user_kernels_dir = os.path.join(jupyter_data_dir(), "kernels")
