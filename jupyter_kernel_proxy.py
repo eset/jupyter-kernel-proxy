@@ -23,8 +23,6 @@ import zmq
 from tornado import ioloop
 from zmq.eventloop import zmqstream
 
-# As defined here: https://jupyter-client.readthedocs.io/en/stable/messaging.html#the-wire-protocol
-DELIMITER = b"<IDS|MSG>"
 
 SocketInfo = namedtuple("SocketInfo", (
     "name",
@@ -44,6 +42,88 @@ KERNEL_SOCKETS = (
 KERNEL_SOCKETS_NAMES = tuple(map(attrgetter("name"), KERNEL_SOCKETS))
 
 SocketGroup = namedtuple("SocketGroup", KERNEL_SOCKETS_NAMES)
+
+JupyterMessageTuple = namedtuple("JupyterMessageTuple", (
+    "identities",      # type: list of byte strings
+                       # "<IDS|MSG>" delimiter goes here
+    "signature",       # type: bytes
+    "header",          # \
+    "parent_header",   #  \ type: dict or bytes (JSON)
+    "metadata",        #  /
+    "content",         # /
+    "buffers",         # type: list of byte strings
+))
+
+class JupyterMessage(JupyterMessageTuple):
+
+    # As defined here:
+    # https://jupyter-client.readthedocs.io/en/stable/messaging.html#the-wire-protocol
+    DELIMITER = b"<IDS|MSG>"
+
+    @classmethod
+    def parse(cls, parts, verify_using=None):
+        i = parts.index(cls.DELIMITER)
+        if i < 0:
+            raise ValueError
+        identities = parts[:i]
+        signature = parts[i+1]
+        payloads = parts[i+2:i+6]
+        buffers = parts[i+6:]
+        raw_msg = cls._make([identities, signature] + payloads + [buffers])
+        if verify_using and not raw_msg.has_valid_signature(verify_using):
+            raise ValueError("Signature verification failed")
+        return raw_msg.parsed
+
+    @property
+    def _json_fields_slice(self):
+        return slice(2, 6)
+
+    @property
+    def json_fields(self):
+        return self[self._json_fields_slice]
+
+    @property
+    def json_field_names(self):
+        return self._fields[self._json_fields_slice]
+
+    @property
+    def parsed(self):
+        def ensure_parsed(field):
+            if isinstance(field, six.binary_type):
+                return json.loads(field)
+            else:
+                return field
+        parsed_fields = [ ensure_parsed(f) for f in self.json_fields ]
+        return self._replace(**dict(zip(self.json_field_names, parsed_fields)))
+
+    @property
+    def serialized(self):
+        def ensure_serialized(field):
+            if not isinstance(field, six.binary_type):
+                return six.ensure_binary(json.dumps(field))
+            else:
+                return field
+        serialized_fields = [ ensure_serialized(f) for f in self.json_fields ]
+        return self._replace(**dict(zip(self.json_field_names, serialized_fields)))
+
+    @property
+    def parts(self):
+        return self.identities + \
+            [ self.DELIMITER, self.signature ] + \
+            list(self.serialized.json_fields) + \
+            self.buffers
+
+    def _compute_signature(self, key):
+        h = hmac.HMAC(six.ensure_binary(key), digestmod=hashlib.sha256)
+        for f in list(self.serialized.json_fields) + self.buffers:
+            h.update(six.ensure_binary(f))
+        return six.ensure_binary(h.hexdigest())
+
+    def has_valid_signature(self, key):
+        return self.signature == self._compute_signature(key)
+
+    def sign_using(self, key):
+        return self._replace(signature=self._compute_signature(key))
 
 
 class AbstractProxyKernel(object):
@@ -114,27 +194,21 @@ class ProxyKernelServer(AbstractProxyKernel):
             validate_using = validate_using or self.config.get("key")
             resign_using = resign_using or self.proxy_target.config.get("key")
         def handler(data):
-            if socktype.signed and validate_using:
-                sig = data[data.index(DELIMITER)+1]
-                if sig != self.sign(data[data.index(DELIMITER)+2:], validate_using):
-                    raise ValueError("Wrong sig")
+            msg = JupyterMessage.parse(data, socktype.signed and validate_using)
             if not self.session_id and is_reply:
                 # We catch the session ID here so that if we inject custom
                 # messages we can use `make_multipart_message` to get a one with
                 # the right ID
-                header = json.loads(data[data.index(DELIMITER)+2])
-                self.session_id = header.get("session")
+                self.session_id = msg.header.get("session")
             for stream_type, msg_type, callback in self.filters:
-                header = json.loads(data[data.index(DELIMITER)+2])
-                if stream_type == socktype and msg_type == header.get("msg_type"):
+                if stream_type == socktype and msg_type == msg.header.get("msg_type"):
                     new_data = callback(self, other_stream, data)
                     if new_data is None:
                         return
                     else:
                         data = new_data
             if socktype.signed and resign_using:
-                sig = self.sign(data[data.index(DELIMITER)+2:], resign_using)
-                data[data.index(DELIMITER)+1] = sig
+                data = msg.sign_using(resign_using).parts
             other_stream.send_multipart(data)
             other_stream.flush()
         return handler
@@ -172,12 +246,8 @@ class ProxyKernelServer(AbstractProxyKernel):
             "msg_type": msg_type,
             "version": "5.0",
         }
-        payload = [
-            six.ensure_binary(json.dumps(c))
-            for c in (header, parent_header, metadata, content)
-        ]
-        return [DELIMITER, self.sign(payload)] + payload
-
+        msg = JupyterMessage([], None, header, parent_header, metadata, content, [])
+        return msg.sign_using(self.config.get("key")).parts
 
 class KernelProxyManager(object):
     def __init__(self, server):
@@ -195,20 +265,19 @@ class KernelProxyManager(object):
         self.connect_to_last()
 
     def _catch_proxy_magic_command(self, server, target_stream, data):
-        header = json.loads(data[data.index(DELIMITER)+2])
-        content = json.loads(data[data.index(DELIMITER)+5])
-    
+        msg = JupyterMessage.parse(data)
+
         def send(text, stream="stdout"):
             server.streams.iopub.send_multipart(server.make_multipart_message(
-                "stream", { "name": stream, "text": text }, parent_header=header
+                "stream", { "name": stream, "text": text }, parent_header=msg.header
             ))
 
-        if content.get("code").startswith(self.magic_command):
+        if msg.content.get("code").startswith(self.magic_command):
             server.streams.iopub.send_multipart(server.make_multipart_message(
-                "status", { "execution_state": "busy"}, parent_header=header
+                "status", { "execution_state": "busy"}, parent_header=msg.header
             ))
 
-            argv = list(filter(lambda x: len(x) > 0, content.get("code").split(" ")))
+            argv = list(filter(lambda x: len(x) > 0, msg.content.get("code").split(" ")))
 
             def send_usage():
                 send("Usage: {:s} [ list | connect <file>]".format(self.magic_command))
@@ -232,12 +301,12 @@ class KernelProxyManager(object):
                 send_usage()
 
             server.streams.iopub.send_multipart(server.make_multipart_message(
-                "status", { "execution_state": "idle"}, parent_header=header
+                "status", { "execution_state": "idle"}, parent_header=msg.header
             ))
 
-            server.streams.shell.send_multipart(data[:data.index(DELIMITER)] +
+            server.streams.shell.send_multipart(msg.identities +
                 server.make_multipart_message(
-                "execute_reply", {"status": "ok"}, parent_header=header
+                "execute_reply", {"status": "ok"}, parent_header=msg.header
             ))
             return None
         else:
@@ -268,22 +337,22 @@ class KernelProxyManager(object):
         return self.kernels
 
     def _on_kernel_info_request(self, server, target_stream, data):
-        header = json.loads(data[data.index(DELIMITER)+2])
-        self._kernel_info_requests.append(header.get("msg_id"))
+        msg = JupyterMessage.parse(data)
+        self._kernel_info_requests.append(msg.header.get("msg_id"))
         ioloop.IOLoop.current().call_later(3, self._send_proxy_kernel_info, data)
         return data
 
     def _on_kernel_info_reply(self, server, target_stream, data):
-        parent_header = json.loads(request[request.index(DELIMITER)+3])
-        if parent_header.get("msg_id") in self._kernel_info_requests:
-            self._kernel_info_requests.remove(parent_header.get("msg_id"))
+        msg = JupyterMessage.parse(data)
+        if msg.parent_header.get("msg_id") in self._kernel_info_requests:
+            self._kernel_info_requests.remove(msg.parent_header.get("msg_id"))
         else:
             self._kernel_info_requests.pop(0)
         return data
 
     def _send_proxy_kernel_info(self, request):
-        parent_header = json.loads(request[request.index(DELIMITER)+2])
-        if not parent_header.get("msg_id") in self._kernel_info_requests:
+        parent = JupyterMessage.parse(request)
+        if not parent.header.get("msg_id") in self._kernel_info_requests:
             return
         msg = self.server.make_multipart_message("kernel_info_reply", {
             "status": "ok",
@@ -293,12 +362,12 @@ class KernelProxyManager(object):
             "language_info": {
                 "name": "magic",
             },
-        }, parent_header=parent_header)
-        self.server.streams.shell.send_multipart(request[:request.index(DELIMITER)] + msg)
+        }, parent_header=parent.header)
+        self.server.streams.shell.send_multipart(parent.identities + msg)
         self.server.streams.iopub.send_multipart(self.server.make_multipart_message(
-            "status", { "execution_state": "idle"}, parent_header=parent_header
+            "status", { "execution_state": "idle"}, parent_header=parent.header
         ))
-        self._kernel_info_requests.remove(parent_header.get("msg_id"))
+        self._kernel_info_requests.remove(parent.header.get("msg_id"))
 
     def connect_to_last(self):
         self.update_running_kernels()
