@@ -277,7 +277,7 @@ class KernelProxyManager(object):
                 "status", { "execution_state": "busy"}, parent_header=msg.header
             ))
 
-            argv = list(filter(lambda x: len(x) > 0, msg.content.get("code").split(" ")))
+            argv = list(filter(lambda x: len(x) > 0, msg.content.get("code").rstrip().split(" ")))
 
             def send_usage():
                 send("Usage: {:s} [ list | connect <file>]".format(self.magic_command))
@@ -367,6 +367,16 @@ class KernelProxyManager(object):
             },
         }, parent_header=parent.header)
         self.server.streams.shell.send_multipart(parent.identities + msg)
+        self.server.streams.iopub.send_multipart(
+            self.server.make_multipart_message("stream",
+                {
+                    "name": "stderr",
+                    "text": "Target kernel did not reply. "
+                            "Use `%proxy list` and `%proxy connect` to use to "
+                            "another kernel.",
+                }
+            )
+        )
         self.server.streams.iopub.send_multipart(self.server.make_multipart_message(
             "status", { "execution_state": "idle"}, parent_header=parent.header
         ))
