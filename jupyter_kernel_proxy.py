@@ -349,7 +349,7 @@ class KernelProxyManager(object):
         msg = JupyterMessage.parse(data)
         if msg.parent_header.get("msg_id") in self._kernel_info_requests:
             self._kernel_info_requests.remove(msg.parent_header.get("msg_id"))
-        else:
+        elif len(self._kernel_info_requests) > 0:
             self._kernel_info_requests.pop(0)
         return data
 
