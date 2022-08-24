@@ -166,6 +166,17 @@ class AbstractProxyKernel(object):
             h.update(m)
         return six.ensure_binary(h.hexdigest())
 
+    def make_multipart_message(self, msg_type, content={}, parent_header={}, metadata={}):
+        header = {
+            "date": datetime.datetime.now().isoformat(),
+            "msg_id": str(uuid.uuid4()),
+            "username": "kernel",
+            "session": getattr(self, "session_id", str(uuid.uuid4())),
+            "msg_type": msg_type,
+            "version": "5.0",
+        }
+        msg = JupyterMessage([], None, header, parent_header, metadata, content, [])
+        return msg.sign_using(self.config.get("key")).parts
 
 class ProxyKernelClient(AbstractProxyKernel):
     def __init__(self, config, role="client", zmq_context=zmq.Context.instance()):
@@ -237,17 +248,6 @@ class ProxyKernelServer(AbstractProxyKernel):
             raise ValueError("callback must be callable")
         self.filters.append(InterceptionFilter(stream_type, msg_type, callback))
 
-    def make_multipart_message(self, msg_type, content={}, parent_header={}, metadata={}):
-        header = {
-            "date": datetime.datetime.now().isoformat(),
-            "msg_id": str(uuid.uuid4()),
-            "username": "kernel",
-            "session": self.session_id,
-            "msg_type": msg_type,
-            "version": "5.0",
-        }
-        msg = JupyterMessage([], None, header, parent_header, metadata, content, [])
-        return msg.sign_using(self.config.get("key")).parts
 
 class KernelProxyManager(object):
     def __init__(self, server):
