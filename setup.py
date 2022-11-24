@@ -7,10 +7,15 @@
 
 from setuptools import setup
 
+with open('README.md', 'r') as readme:
+    long_description = readme.read()
+
 setup(
     name='jupyter-kernel-proxy',
-    version='1.0',
+    version='1.0.1',
     description='Jupyter kernel acting as a proxy to any other, already running, kernel.',
+    long_description=long_description,
+    long_description_content_type="text/markdown",
     author='Marc-Etienne M.Léveillé',
     author_email='leveille@eset.com',
     url='https://github.com/eset/jupyter-kernel-proxy',
